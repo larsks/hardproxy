@@ -80,22 +80,21 @@ func (p *Proxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Read response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("Error reading response body: %v", err)
-		http.Error(w, "Error reading response", http.StatusInternalServerError)
-		return
-	}
-
-	// Store in cache
 	// Create directory structure for the cache file
-	cacheDir := filepath.Dir(cacheFile)
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+	cacheFileDir := filepath.Dir(cacheFile)
+	if err := os.MkdirAll(cacheFileDir, 0755); err != nil {
 		log.Printf("Warning: failed to create cache directory: %v", err)
 	}
-	if err := os.WriteFile(cacheFile, body, 0644); err != nil {
-		log.Printf("Warning: failed to write cache file: %v", err)
+
+	// Create cache file
+	cacheFd, err := os.Create(cacheFile)
+	if err != nil {
+		log.Printf("Warning: failed to create cache file: %v", err)
+		// Continue without caching
+		cacheFd = nil
+	}
+	if cacheFd != nil {
+		defer cacheFd.Close()
 	}
 
 	// Copy response headers
@@ -105,10 +104,22 @@ func (p *Proxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("X-Cache", "MISS")
-
-	// Write status code and body
 	w.WriteHeader(resp.StatusCode)
-	w.Write(body)
+
+	// Stream response body to both client and cache file
+	if cacheFd != nil {
+		// Use io.MultiWriter to write to both destinations simultaneously
+		_, err = io.Copy(io.MultiWriter(w, cacheFd), resp.Body)
+		if err != nil {
+			log.Printf("Warning: error writing response: %v", err)
+		}
+	} else {
+		// If cache file creation failed, just write to client
+		_, err = io.Copy(w, resp.Body)
+		if err != nil {
+			log.Printf("Warning: error writing response: %v", err)
+		}
+	}
 }
 
 func (p *Proxy) getCacheFilename(url string) string {
